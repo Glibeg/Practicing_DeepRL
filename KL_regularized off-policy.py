@@ -100,7 +100,7 @@ class KL():
     def __init__(self, states_dim, default_states_dim, action_space):
         self.learning_rate = 0.0005
         self.memory_capacity = int(2e+6)
-        self.batch_size = 64
+        self.batch_size = 512
         self.action_space = action_space
         self.action_high = torch.tensor(self.action_space.maximum, dtype = torch.float32).to(device)
         self.alpha = 0.01
@@ -221,16 +221,18 @@ def state_preprocessing(state):
 parser = argparse.ArgumentParser()
 parser.add_argument('-domain', action = 'store', default= 'quadruped')
 parser.add_argument('-task', action = 'store', default= 'fetch')
+parser.add_argument('-time', default = 30, type = int)
+parser.add_argument('-default_dim', default = 78, type = int)
 parser.add_argument('--test', action = 'store_true')
 parser.add_argument('--load', action = 'store_true')
 args = parser.parse_args()
 
 #env = gym.make('FetchReach-v1')
-env = suite.load(domain_name = args.domain, task_name = args.task, environment_kwargs = {'flat_observation' : True}, task_kwargs = {'time_limit' : 40})
+env = suite.load(domain_name = args.domain, task_name = args.task, environment_kwargs = {'flat_observation' : True}, task_kwargs = {'time_limit' : args.time})
 #env.env.reward_type = 'dense'
 #env = gym.wrappers.filter_observation.FilterObservation(env, filter_keys=['observation', 'desired_goal'])
 #env = gym.wrappers.flatten_observation.FlattenObservation(env)
-agent = KL(90, 78, env.action_spec())
+agent = KL(env.observation_spec()['observations'].shape[0], args.default_dim, env.action_spec())
 #vime = VIME(90, env.action_spec().shape[0], device = device, hidden_layer_size = 256)
 
 if args.load:

@@ -29,7 +29,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #torch.set_default_dtype(torch.float32)
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward', 'done'))
+                        ('state', 'action', 'next_state', 'reward'))
 
 class ReplayMemory(object):
     def __init__(self, capacity):
@@ -85,12 +85,15 @@ class PolicyNet(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(observations, 200)
         self.fc2 = nn.Linear(200, 300)
-        self.fc3 = nn.Linear(300, 300)
-        self.out = nn.Linear(300, actions)
+        self.fc3 = nn.Linear(300, 400)
+        self.fc4 = nn.Linear(400, 400)
+        self.out = nn.Linear(400, actions)
+
     def forward(self, x):
         h = torch.relu(self.fc1(x))
         h = torch.relu(self.fc2(h))
         h = torch.relu(self.fc3(h))
+        h = torch.relu(self.fc4(h))
         return torch.tanh(self.out(h))
 """
 class ValueNet(nn.Module):
@@ -110,14 +113,16 @@ class ValueNet(nn.Module):
 class ValueNet(nn.Module):
     def __init__(self, observations, actions):
         super().__init__()
-        self.fc1 = nn.Linear(observations + actions, 200)
-        self.fc2 = nn.Linear(200, 300)
-        self.fc3 = nn.Linear(300, 300)
-        self.out = nn.Linear(300, 1)
+        self.fc1 = nn.Linear(observations + actions, 300)
+        self.fc2 = nn.Linear(300, 400)
+        self.fc3 = nn.Linear(400, 500)
+        self.fc4 = nn.Linear(500, 400)
+        self.out = nn.Linear(400, 1)
     def forward(self, x, a):
         h = torch.relu(self.fc1(torch.cat([x,a], dim = -1)))
         h = torch.relu(self.fc2(h))
         h = torch.relu(self.fc3(h))
+        h = torch.relu(self.fc4(h))
         return self.out(h)
 
 class DDPG():
@@ -161,7 +166,6 @@ class DDPG():
             transitions = self.replay_buffer.sample(self.batch_size)
             batch = Transition(*zip(*transitions))
             next_state_batch = torch.cat(batch.next_state)
-            done_batch = torch.cat(batch.done)
             state_batch = torch.cat(batch.state)
             action_batch = torch.cat(batch.action)
             reward_batch = torch.cat(batch.reward)
@@ -169,7 +173,7 @@ class DDPG():
             with torch.no_grad():
                 target_action = self.policy_net_target(next_state_batch)
                 value_target = self.value_net_target(next_state_batch, target_action)
-                td_target = reward_batch + self.gamma * (1 - done_batch) * value_target
+                td_target = reward_batch + self.gamma * value_target
             #print('state : ', state_batch, '\naction : ', action_batch, '\nnext_state : ', next_state_batch, '\ndone : ', done_batch, '\nreward : ', reward_batch, '\ntarget_action : ', target_action, '\nvalue_target : ', value_target, '\ntd_target : ', td_target)
             #exit(0)
             self.value_optim.zero_grad()
@@ -208,6 +212,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-domain', action = 'store', default= 'reacher')
 parser.add_argument('-task', action = 'store', default= 'easy')
 parser.add_argument('--test', action = 'store_true')
+parser.add_argument('-hidden', nargs = '*', default = ['200', '300', '300'], type = int)
+parser.add_argument('-activation', action = 'store', default = 'relu', choices = ['relu', 'silu', 'elu'])
 args = parser.parse_args()
 #print(args)
 
@@ -236,7 +242,7 @@ if args.test:
     exit(0)
 #viewer.launch(env, policy=policy_by_agent)
 #exit(0)
-initial_count = 0
+interaction_count = 0
 num_episodes = 1000
 for e in range(num_episodes):
     done = False
@@ -247,10 +253,9 @@ for e in range(num_episodes):
     state = state_preprocessing(time_step.observation['observations'])
 
     for c in count():
-        if initial_count <= agent.update_after:
+        if interaction_count <= agent.update_after:
             action = np.random.uniform(env.action_spec().minimum, env.action_spec().maximum, env.action_spec().shape)
             action = torch.tensor(action, dtype=torch.float32).unsqueeze(0).to(device)
-            initial_count += 1
         else:
             with torch.no_grad():
                 action = agent.get_action(state)
@@ -262,20 +267,19 @@ for e in range(num_episodes):
         #n_o = time_step.observation['observations']
         next_state = state_preprocessing(time_step.observation['observations'])
         r = time_step.reward
-        done = 1.0 if time_step.step_type == 2 else 0.0
         score += r
-        done = torch.tensor([[done]]).to(device)
 
         #info_gain, log_likelihood = vime.calc_info_gain(o,a,n_o)
         #vime.memorize_episodic_info_gains(info_gain)
         #r = vime.calc_curiosity_reward(r, info_gain)
         reward = torch.tensor([[r]], dtype=torch.float32).to(device)
 
-        agent.replay_buffer.push(state, action, next_state, reward, done)
+        agent.replay_buffer.push(state, action, next_state, reward)
         state = next_state
+        interaction_count += 1
         #o = n_o
         
-        if c % agent.update_every == 0:
+        if interaction_count % agent.update_every == 0:
             qloss, ploss = agent.train_model()
             if qloss != None:
                 qloss_list.append(qloss)
