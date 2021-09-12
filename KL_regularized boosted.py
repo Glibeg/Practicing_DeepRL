@@ -28,7 +28,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #torch.set_default_dtype(torch.float32)
 Transition = namedtuple('Transition',
-                        ('state_seq', 'action_seq', 'reward_seq', 'next_state'))
+                        ('state_seq', 'action_seq', 'log_prob_seq', 'reward_seq', 'next_state'))
 
 class ReplayMemory(object):
     def __init__(self, capacity):
@@ -53,16 +53,16 @@ STD_MAX_NOISE = 1
 class PolicyNet(nn.Module):
     def __init__(self, observations, actions):
         super(PolicyNet, self).__init__()
-        self.policy_fc1 = nn.Linear(observations, 100)
-        self.policy_fc2 = nn.Linear(100, 300)
+        self.policy_fc1 = nn.Linear(observations, 300)
+        self.policy_fc2 = nn.Linear(300, 300)
         self.policy_fc3 = nn.Linear(300, 200)
         self.policy_mean_out = nn.Linear(200, actions)
         self.policy_logstd_out = nn.Linear(200, actions)
 
     def forward(self, x):#, deterministic = False, with_logprob = True):
-        h = F.elu(self.policy_fc1(x))
-        h = F.elu(self.policy_fc2(h))
-        h = F.elu(self.policy_fc3(h))
+        h = F.relu(self.policy_fc1(x))
+        h = F.relu(self.policy_fc2(h))
+        h = F.relu(self.policy_fc3(h))
         mean = torch.tanh(self.policy_mean_out(h))
         std = 0.1 + (STD_MAX_NOISE - 0.1) * torch.sigmoid(self.policy_logstd_out(h))
         return mean, std
@@ -85,15 +85,15 @@ class PolicyNet(nn.Module):
 class ValueNet(nn.Module):
     def __init__(self, observations, actions):
         super(ValueNet, self).__init__()
-        self.critic_fc1 = nn.Linear(observations + actions, 100)
-        self.critic_fc2 = nn.Linear(100, 400)
+        self.critic_fc1 = nn.Linear(observations + actions, 400)
+        self.critic_fc2 = nn.Linear(400, 400)
         self.critic_fc3 = nn.Linear(400, 300)
         self.critic_out = nn.Linear(300, 1)
 
     def forward(self, x, a):
-        ch1 = F.elu(self.critic_fc1(torch.cat([x,a], dim = -1)))
-        ch2 = F.elu(self.critic_fc2(ch1))
-        ch3 = F.elu(self.critic_fc3(ch2))
+        ch1 = F.relu(self.critic_fc1(torch.cat([x,a], dim = -1)))
+        ch2 = F.relu(self.critic_fc2(ch1))
+        ch3 = F.relu(self.critic_fc3(ch2))
         return self.critic_out(ch3)
 
 class KL():
@@ -104,10 +104,11 @@ class KL():
         self.action_space = action_space
         self.rollout = 10
         self.alpha = 0.1
+        self._lambda = 1
         self.gamma = 0.9
         self.polyak = 0.995
         self.update_period = 50
-        self.update_times = 20
+        self.update_times = 50
         self.update_after = 5000
         self.render = True
         self.default_states_dim = default_states_dim
@@ -138,8 +139,9 @@ class KL():
     def get_action(self, state, deterministic = False):
         with torch.no_grad():
             mean, std = self.policy_net(state)
-            eps = 0 if deterministic else torch.randn_like(std)
-            return torch.max(torch.min(mean + std * eps, torch.tensor(self.action_space.maximum, dtype = torch.float32).to(device)), torch.tensor(self.action_space.minimum, dtype = torch.float32).to(device))
+            pi_distribution = Normal(mean, std)
+            action = pi_distribution.sample()
+            return torch.max(torch.min(mean if deterministic else action, torch.tensor(self.action_space.maximum, dtype = torch.float32).to(device)), torch.tensor(self.action_space.minimum, dtype = torch.float32).to(device)), pi_distribution.log_prob(action).sum()
 
     def train_model(self):
         if len(self.replay_buffer) < self.batch_size:
@@ -151,8 +153,9 @@ class KL():
             next_state_batch = torch.cat(batch.next_state)
             state_batch = torch.cat(batch.state_seq)
             action_batch = torch.cat(batch.action_seq)
+            log_prob_batch = torch.cat(batch.log_prob_seq)
             reward_batch = torch.cat(batch.reward_seq)
-
+            
             mean, std = self.policy_net(state_batch)
             default_mean, default_std = self.default_policy_net(state_batch[...,:self.default_states_dim])
             default_mean_target, default_std_target = self.default_policy_net_target(state_batch[...,:self.default_states_dim])
@@ -179,29 +182,49 @@ class KL():
                 next_pi_distribution_target = Normal(next_mean_target, next_std_target)
                 target_action = next_pi_distribution_target.sample()
                 target_action = torch.max(torch.min(target_action, torch.tensor(self.action_space.maximum, dtype=torch.float32).to(device)), torch.tensor(self.action_space.minimum, dtype=torch.float32).to(device))
-                value_target = self.value_net_target(next_state_batch, target_action)
-                td_target = reward_batch + self.gamma * (value_target - self.alpha * next_kl_div_term_target.detach()) - self.alpha * kl_div_term_target.detach() 
-            
+                value_target = (self.value_net_target(next_state_batch, target_action) - next_kl_div_term_target).unsqueeze(1)
+                #print(value_target, value_target.shape)
+                target_q = reward_batch + value_target
+                #print(reward_batch, reward_batch.shape)
+                next_expected_q = torch.cat([target_q, value_target], dim = 1)[:,1:]
+                td_error = reward_batch + self.gamma * next_expected_q - target_q
+                #print(td_error, td_error.shape)
+                retrace_op = (pi_distribution.log_prob(action_batch).sum(dim = -1, keepdim = True) - log_prob_batch).clamp_min(0).exp().multiply(self._lambda)
+                #retrace_q_tmp_list = []
+                #for i in range(self.rollout):
+                #    retrace_q_tmp_list.append((td_error[:,i:] * F.pad(retrace_op[:,(i+1):].cumprod(1), (0,0,1,0), value = 1) * torch.pow(self.gamma, torch.arange(self.rollout - i).unsqueeze(0).unsqueeze(2))).sum(dim = 1, keepdim = True))
+                #retrace_q = torch.cat(retrace_q_tmp_list, dim = 1) + target_q
+                #print(retrace_q, retrace_q.shape)
+                retrace_q_tmp_list = [td_error[:,9].unsqueeze(1)]
+                tmp = td_error[:,9]
+                for i in range(self.rollout - 1):
+                    tmp = tmp * self.gamma * retrace_op[:,9 - i] + td_error[:, 8 - i]
+                    retrace_q_tmp_list.append(tmp.unsqueeze(1))
+                retrace_q = torch.cat(list(reversed(retrace_q_tmp_list)), dim = 1) + target_q
+                #print(retrace_q, retrace_q.shape)
+
             self.policy_optim.zero_grad()
             action = pi_distribution.rsample()
             value = self.value_net_target(state_batch, action)
-            policy_loss = (self.alpha * (kl_div_term_target + next_kl_div_term_target) - value).mean()
+            policy_loss = self.alpha * torch.cat((kl_div_term_target, next_kl_div_term_target.unsqueeze(1)), dim = 1).mean()- value.mean()
             policy_loss.backward()
             self.policy_optim.step()
             ploss_list.append(policy_loss.cpu().detach().numpy())
 
             self.value_optim.zero_grad()
             state_action = self.value_net(state_batch, action_batch)
-            q_loss = F.mse_loss(state_action, td_target)
+            print(state_action.view(-1), retrace_q.view(-1))
+            q_loss = F.mse_loss(state_action, retrace_q)
             q_loss.backward()
+            print(q_loss.item())
             self.value_optim.step()
             qloss_list.append(q_loss.cpu().detach().numpy())
 
             self.default_policy_optim.zero_grad()
-            default_policy_loss = (kl_div_term + next_kl_div_term).mean()
+            default_policy_loss = torch.cat((kl_div_term, next_kl_div_term.unsqueeze(1)), dim = 1).mean()
             default_policy_loss.backward()
             self.default_policy_optim.step()
-
+            
             with torch.no_grad():
                 for param, target_param in zip(self.value_net.parameters(), self.value_net_target.parameters()):
                     target_param.data.mul_(self.polyak)
@@ -212,7 +235,7 @@ class KL():
                 for param, target_param in zip(self.default_policy_net.parameters(), self.default_policy_net_target.parameters()):
                     target_param.data.mul_(self.polyak)
                     target_param.data.add_(param.data * (1-self.polyak))
-
+        
         return  np.mean(qloss_list), np.mean(ploss_list)
 
 def state_preprocessing(state):
@@ -236,7 +259,7 @@ scores, episodes = [], []
 score_avg = 0
 
 def policy_by_agent(time_step):
-    torch_action =  agent.get_action(state_preprocessing(time_step.observation['observations']))
+    torch_action, _ =  agent.get_action(state_preprocessing(time_step.observation['observations']))
     return torch_action.squeeze(0).cpu().detach().numpy()
 
 if args.test:
@@ -250,7 +273,7 @@ for e in range(num_episodes):
     done = False
     score = 0
     qloss_list, ploss_list = [], []
-    state_seq, action_seq, reward_seq = [], [], []
+    state_seq, action_seq, log_prob_seq, reward_seq = [], [], [], []
     time_step = env.reset()
     state = state_preprocessing(time_step.observation['observations'])
 
@@ -258,8 +281,9 @@ for e in range(num_episodes):
         if interaction_count <= agent.update_after:
             action = np.random.uniform(env.action_spec().minimum, env.action_spec().maximum, env.action_spec().shape)
             action = torch.tensor(action, dtype=torch.float32).unsqueeze(0).to(device)
+            log_prob = -np.log(env.action_spec().maximum - env.action_spec().minimum).sum()
         else:
-            action = agent.get_action(state)
+            action, log_prob = agent.get_action(state)
         
         a = action.squeeze(0).cpu().detach().numpy()
         time_step = env.step(a)
@@ -267,14 +291,16 @@ for e in range(num_episodes):
         next_state = state_preprocessing(time_step.observation['observations'])
         r = time_step.reward
         score += r
+        log_prob = torch.tensor([[log_prob]], dtype = torch.float32).to(device)
         reward = torch.tensor([[r]], dtype=torch.float32).to(device)
 
         state_seq.append(state)
         action_seq.append(action)
+        log_prob_seq.append(log_prob)
         reward_seq.append(reward)
         if (c+1)%agent.rollout == 0:
-            agent.replay_buffer.push(torch.cat(state_seq).unsqueeze(0), torch.cat(action_seq).unsqueeze(0), torch.cat(reward_seq).unsqueeze(0), next_state)
-            state_seq, action_seq, reward_seq = [], [], []
+            agent.replay_buffer.push(torch.cat(state_seq).unsqueeze(0), torch.cat(action_seq).unsqueeze(0), torch.cat(log_prob_seq).unsqueeze(0), torch.cat(reward_seq).unsqueeze(0), next_state)
+            state_seq, action_seq, log_prob_seq, reward_seq = [], [], [], []
 
         state = next_state
 
@@ -290,7 +316,7 @@ for e in range(num_episodes):
             ploss_avg = 0.0 if len(ploss_list) == 0 else np.mean(ploss_list)
             print("episode : {:3d} | end at : {:3d} steps | total interactions : {:7d} | score : {:8.3f} | q_loss = {:7.3f} | p_loss = {:7.3f} ".format(e, c+1, interaction_count, score, qloss_avg, ploss_avg))
             break
-    torch.save(agent.policy_net.state_dict(), f'./{args.domain}_{args.task}_pnet.pth')
-    torch.save(agent.default_policy_net.state_dict(), f'./{args.domain}_{args.task}_dpnet.pth')
-    torch.save(agent.value_net.state_dict(), f'./{args.domain}_{args.task}_vnet.pth')
+    #torch.save(agent.policy_net.state_dict(), f'./{args.domain}_{args.task}_pnet.pth')
+    #torch.save(agent.default_policy_net.state_dict(), f'./{args.domain}_{args.task}_dpnet.pth')
+    #torch.save(agent.value_net.state_dict(), f'./{args.domain}_{args.task}_vnet.pth')
 env.close()

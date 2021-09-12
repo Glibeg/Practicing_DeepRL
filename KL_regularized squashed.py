@@ -185,8 +185,7 @@ class KL():
                 #tanh_sampled_next_action = torch.tanh(sampled_next_action)
                 #print(torch.exp((tanh_next_pi_distribution.log_prob(tanh_sampled_next_action) - log_prob_of_sampled_next_action).sum(-1)))
                 estimated_next_kl_div_term_target = (torch.exp(-2 * (np.log(2) - sampled_next_action - F.softplus(-2 * sampled_next_action)).sum(axis = -1, keepdim = True)) * (log_prob_of_sampled_next_action - log_prob_of_sampled_next_action_default).sum(axis = -1, keepdim = True)).mean(axis = 0)
-                print(estimated_next_kl_div_term_target)
-                exit(0)
+                #print(estimated_next_kl_div_term_target)
                 #print(next_kl_div_term_target)
                 td_target = reward_batch + self.gamma * (value_target - self.alpha * estimated_next_kl_div_term_target.detach())# - self.alpha * kl_div_term_target.detach() 
             
@@ -212,8 +211,8 @@ class KL():
             ploss_list.append(policy_loss.cpu().detach().numpy())
 
             self.default_policy_optim.zero_grad()
-            sampled_d_a = pi_distribution.sample()
-            estimated_kl_div_term = torch.exp(-2 * (np.log(2) - sampled_d_a - F.softplus(-2 * sampled_d_a)).sum(axis = -1, keepdim = True)) * (pi_distribution.log_prob(sampled_d_a).detach() - pi_zero_distribution.log_prob(sampled_d_a)).sum(axis = -1, keepdim = True)
+            sampled_d_a = pi_distribution.sample((512,))
+            estimated_kl_div_term = (torch.exp(-2 * (np.log(2) - sampled_d_a - F.softplus(-2 * sampled_d_a)).sum(axis = -1, keepdim = True)) * (pi_distribution.log_prob(sampled_d_a).detach() - pi_zero_distribution.log_prob(sampled_d_a)).sum(axis = -1, keepdim = True)).mean(axis = 0)
             default_policy_loss = estimated_kl_div_term.mean()
             default_policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.default_policy_net.parameters(), self.grad_clipping_norm)

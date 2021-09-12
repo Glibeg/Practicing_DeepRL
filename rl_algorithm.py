@@ -32,8 +32,8 @@ def state_preprocessing(state):
     return torch.tensor(state.copy(), dtype = torch.float32).unsqueeze(0).to(device)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-agent', action = 'store', default = 'ddpg')
-parser.add_argument('-env', action = 'store', default = 'dm_control')
+parser.add_argument('-agent', action = 'store', choices = ['ddpg','sac'])
+parser.add_argument('-env', action = 'store', choices = ['dm_control','openai_gym'])
 parser.add_argument('-domain', action = 'store', default= 'reacher')
 parser.add_argument('-task', action = 'store', default= 'easy')
 parser.add_argument('--test', action = 'store_true')
