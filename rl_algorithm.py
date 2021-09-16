@@ -25,6 +25,8 @@ from pathlib import Path
 
 from vime import VIME
 
+from agent import DDPG
+
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,23 +35,55 @@ def state_preprocessing(state):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-agent', action = 'store', choices = ['ddpg','sac'])
-parser.add_argument('-env', action = 'store', choices = ['dm_control','openai_gym'])
 parser.add_argument('-domain', action = 'store', default= 'reacher')
 parser.add_argument('-task', action = 'store', default= 'easy')
+parser.add_argument('-hidden', nargs = '*', default = ['200', '300', '300'], type = int)
+parser.add_argument('-activation', action = 'store', default = 'relu', choices = ['relu', 'silu', 'elu'])
+parser.add_argument('-lr', action = 'store', default = 5e-4, type = float)
 parser.add_argument('--test', action = 'store_true')
-
 args = parser.parse_args()
 
-agent_available_list = ['ddpg','sac']
-env_available_list = ['dm_control','openai_gym']
+activation_dict = {'relu' : nn.ReLU, 'silu' : nn.SiLU, 'elu' : nn.ELU}
 
-if args.agent not in agent_available_list or args.env not in env_available_list:
-    print(f'{args.agent} or {args.env} is not valid input')
-    exit(0)
 #print(args)
 Path(f'/{args.agent}').mkdir(exist_ok= True)
 env = suite.load(domain_name = args.domain, task_name = args.task, environment_kwargs = {'flat_observation' : True})#, task_kwargs = {'time_limit' : 60})
-agent = DDPG(env.observation_spec()['observations'].shape[0], env.action_spec())
+
+class PolicyNet(nn.Module):
+    def __init__(self, observation_dim, action_dim, hidden_layers, activation):
+        super(PolicyNet, self).__init__()
+        layers = []
+        for i in range(len(hidden_layers)):
+            layers += [nn.Linear(([observation_dim] + hidden_layers)[i], hidden_layers[i]), activation()]
+        self.mlp = nn.Sequential(*layers)
+        self.policy_mean_out = nn.Linear(hidden_layers[-1], action_dim)
+        self.policy_logstd_out = nn.Linear(hidden_layers[-1], action_dim)
+
+    def forward(self, x):#, deterministic = False, with_logprob = True):
+        h = self.mlp(x)
+        mean = torch.tanh(self.policy_mean_out(h))
+        std = 0.1 + (0.9) * torch.sigmoid(self.policy_logstd_out(h))
+        return mean, std
+
+class ValueNet(nn.Module):
+    def __init__(self, observation_dim, action_dim, hidden_layers, activation):
+        super(ValueNet, self).__init__()
+        layers = []
+        for i in range(len(hidden_layers)):
+            layers += [nn.Linear(([observation_dim + action_dim] + hidden_layers)[i], hidden_layers[i]), activation()]
+        self.mlp = nn.Sequential(*layers)
+        self.critic_out = nn.Linear(hidden_layers[-1], 1)
+
+    def forward(self, x, a):
+        h = self.mlp(torch.cat([x,a], dim = -1))
+        return self.critic_out(h)
+
+policynet = PolicyNet(env.observation_spec()['observations'].shape[0], env.action_spec().shape[0], args.hidden, activation_dict[args.activation])
+policyOptim = optim.Adam(policynet.parameters(), lr= args.lr)
+valuenet = ValueNet(env.observation_spec()['observations'].shape[0], env.action_spec().shape[0], args.hidden, activation_dict[args.activation])
+valueOptim = optim.Adam(valuenet.parameters(), lr= args.lr)
+exit()
+agent = DDPG.DDPG(env.observation_spec()['observations'].shape[0], env.action_spec())
 
 scores, episodes = [], []
 score_avg = 0

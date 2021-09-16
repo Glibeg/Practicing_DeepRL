@@ -190,6 +190,8 @@ class KL():
                 td_error = reward_batch + self.gamma * next_expected_q - target_q
                 #print(td_error, td_error.shape)
                 retrace_op = (pi_distribution.log_prob(action_batch).sum(dim = -1, keepdim = True) - log_prob_batch).clamp_min(0).exp().multiply(self._lambda)
+                print(retrace_op.view(-1))
+                print((F.pad(retrace_op[:,(1):].cumprod(1), (0,0,1,0), value = 1) * torch.pow(self.gamma, torch.arange(self.rollout - 0).unsqueeze(0).unsqueeze(2))).view(-1), retrace_op.shape)
                 #retrace_q_tmp_list = []
                 #for i in range(self.rollout):
                 #    retrace_q_tmp_list.append((td_error[:,i:] * F.pad(retrace_op[:,(i+1):].cumprod(1), (0,0,1,0), value = 1) * torch.pow(self.gamma, torch.arange(self.rollout - i).unsqueeze(0).unsqueeze(2))).sum(dim = 1, keepdim = True))

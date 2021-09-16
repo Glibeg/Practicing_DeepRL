@@ -99,16 +99,17 @@ class ValueNet(nn.Module):
 class KL():
     def __init__(self, states_dim, default_states_dim, action_space):
         self.learning_rate = 0.0005
-        self.memory_capacity = int(2e+6)
-        self.batch_size = 512
+        self.memory_capacity = int(1e+6)
+        self.batch_size = 256
         self.action_space = action_space
-        self.action_high = torch.tensor(self.action_space.maximum, dtype = torch.float32).to(device)
+        self.action_high = torch.tensor(self.action_space.maximum.copy(), dtype = torch.float32).to(device)
         self.alpha = 0.01
         self.gamma = 0.9
         self.polyak = 0.995
-        self.update_every = 50
-        self.update_after = 5000
+        self.train_period = 200
+        self.start_train_after = 20000
         self.render = True
+        self.gradient_clip = 1.
         self.default_states_dim = default_states_dim
 
         self.policy_net = PolicyNet(states_dim,action_space.shape[0]).to(device)
@@ -138,82 +139,83 @@ class KL():
         with torch.no_grad():
             mean, std = self.policy_net(state)
             eps = 0 if deterministic else torch.randn_like(std)
-            return torch.max(torch.tanh(mean + std * eps) * self.action_high, torch.tensor(self.action_space.minimum, dtype = torch.float32).to(device))
+            return torch.max(torch.tanh(mean + std * eps) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
 
     def train_model(self):
         if len(self.replay_buffer) < self.batch_size:
             return None, None
-        qloss_list, ploss_list = [],[]
-        for c in range(self.update_every):
-            transitions = self.replay_buffer.sample(self.batch_size)
-            batch = Transition(*zip(*transitions))
-            next_state_batch = torch.cat(batch.next_state)
-            state_batch = torch.cat(batch.state)
-            action_batch = torch.cat(batch.action)
-            reward_batch = torch.cat(batch.reward)
+        transitions = self.replay_buffer.sample(self.batch_size)
+        batch = Transition(*zip(*transitions))
+        next_state_batch = torch.cat(batch.next_state)
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        reward_batch = torch.cat(batch.reward)
 
-            mean, std = self.policy_net(state_batch)
-            default_mean, default_std = self.default_policy_net(state_batch[:,:self.default_states_dim])
-            default_mean_target, default_std_target = self.default_policy_net_target(state_batch[:,:self.default_states_dim])
-            pi_distribution = Normal(mean, std)
-            pi_zero_distribution = Normal(default_mean, default_std)
-            pi_zero_distribution_target = Normal(default_mean_target, default_std_target)
-            
-            next_mean, next_std = self.policy_net(next_state_batch)
-            next_default_mean, next_default_std = self.default_policy_net(next_state_batch[:,:self.default_states_dim])
-            next_default_mean_target, next_default_std_target = self.default_policy_net_target(next_state_batch[:,:self.default_states_dim])
-            next_pi_distribution = Normal(next_mean, next_std)
-            next_pi_zero_distribution = Normal(next_default_mean, next_default_std)
-            next_pi_zero_distribution_target = Normal(next_default_mean_target, next_default_std_target)
+        mean, std = self.policy_net(state_batch)
+        default_mean, default_std = self.default_policy_net(state_batch[:,:self.default_states_dim])
+        default_mean_target, default_std_target = self.default_policy_net_target(state_batch[:,:self.default_states_dim])
+        pi_distribution = Normal(mean, std)
+        pi_zero_distribution = Normal(default_mean, default_std)
+        pi_zero_distribution_target = Normal(default_mean_target, default_std_target)
+        
+        next_mean, next_std = self.policy_net(next_state_batch)
+        next_default_mean, next_default_std = self.default_policy_net(next_state_batch[:,:self.default_states_dim])
+        next_default_mean_target, next_default_std_target = self.default_policy_net_target(next_state_batch[:,:self.default_states_dim])
+        next_pi_distribution = Normal(next_mean, next_std)
+        next_pi_zero_distribution = Normal(next_default_mean, next_default_std)
+        next_pi_zero_distribution_target = Normal(next_default_mean_target, next_default_std_target)
 
-            pi_distribution_grad_cut = Normal(mean.detach(), std.detach())
-            next_pi_distribution_grad_cut = Normal(next_mean.detach(), next_std.detach())
-            kl_div_term = torch.distributions.kl.kl_divergence(pi_distribution_grad_cut, pi_zero_distribution).sum(axis = -1, keepdim = True)
-            next_kl_div_term = torch.distributions.kl.kl_divergence(next_pi_distribution_grad_cut, next_pi_zero_distribution).sum(axis = -1, keepdim = True)
-            kl_div_term_target = torch.distributions.kl.kl_divergence(pi_distribution, pi_zero_distribution_target).sum(axis = -1, keepdim = True)
-            next_kl_div_term_target = torch.distributions.kl.kl_divergence(next_pi_distribution, next_pi_zero_distribution_target).sum(axis = -1, keepdim = True)
+        pi_distribution_grad_cut = Normal(mean.detach(), std.detach())
+        next_pi_distribution_grad_cut = Normal(next_mean.detach(), next_std.detach())
+        kl_div_term = torch.distributions.kl.kl_divergence(pi_distribution_grad_cut, pi_zero_distribution).sum(axis = -1, keepdim = True)
+        next_kl_div_term = torch.distributions.kl.kl_divergence(next_pi_distribution_grad_cut, next_pi_zero_distribution).sum(axis = -1, keepdim = True)
+        kl_div_term_target = torch.distributions.kl.kl_divergence(pi_distribution, pi_zero_distribution_target).sum(axis = -1, keepdim = True)
+        next_kl_div_term_target = torch.distributions.kl.kl_divergence(next_pi_distribution, next_pi_zero_distribution_target).sum(axis = -1, keepdim = True)
 
-            with torch.no_grad():
-                next_mean_target, next_std_target = self.policy_net_target(next_state_batch)
-                next_pi_distribution_target = Normal(next_mean_target, next_std_target)
-                target_action = next_pi_distribution_target.sample()
-                target_action = torch.max(torch.tanh(target_action) * self.action_high, torch.tensor(self.action_space.minimum, dtype = torch.float32).to(device))
-                value_target = self.value_net_target(next_state_batch, target_action)
-                td_target = reward_batch + self.gamma * (value_target - self.alpha * next_kl_div_term_target.detach()) - self.alpha * kl_div_term_target.detach() 
-            
-            self.policy_optim.zero_grad()
-            action = pi_distribution.rsample()
-            action = torch.max(torch.tanh(action) * self.action_high, torch.tensor(self.action_space.minimum, dtype = torch.float32).to(device))
-            value = self.value_net_target(state_batch, action)
-            policy_loss = (self.alpha * (kl_div_term_target + next_kl_div_term_target) - value).mean()
-            policy_loss.backward()
-            self.policy_optim.step()
-            ploss_list.append(policy_loss.cpu().detach().numpy())
+        with torch.no_grad():
+            next_mean_target, next_std_target = self.policy_net_target(next_state_batch)
+            next_pi_distribution_target = Normal(next_mean_target, next_std_target)
+            target_action = next_pi_distribution_target.sample()
+            target_action = torch.max(torch.tanh(target_action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
+            value_target = self.value_net_target(next_state_batch, target_action)
+            td_target = reward_batch + self.gamma * (value_target - self.alpha * next_kl_div_term_target.detach()) - self.alpha * kl_div_term_target.detach() 
+        
+        self.policy_optim.zero_grad()
+        action = pi_distribution.rsample()
+        action = torch.max(torch.tanh(action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
+        value = self.value_net_target(state_batch, action)
+        policy_loss = (self.alpha * (kl_div_term_target + next_kl_div_term_target) - value).mean()
+        policy_loss.backward()
+        nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.gradient_clip)
+        self.policy_optim.step()
+        ploss_list.append(policy_loss.cpu().detach().numpy())
 
-            self.value_optim.zero_grad()
-            state_action = self.value_net(state_batch, action_batch)
-            q_loss = F.mse_loss(state_action, td_target)
-            q_loss.backward()
-            self.value_optim.step()
-            qloss_list.append(q_loss.cpu().detach().numpy())
+        self.value_optim.zero_grad()
+        state_action = self.value_net(state_batch, action_batch)
+        q_loss = F.mse_loss(state_action, td_target)
+        q_loss.backward()
+        nn.utils.clip_grad_norm_(self.value_net.parameters(), self.gradient_clip)
+        self.value_optim.step()
+        qloss_list.append(q_loss.cpu().detach().numpy())
 
-            self.default_policy_optim.zero_grad()
-            default_policy_loss = (kl_div_term + next_kl_div_term).mean()
-            default_policy_loss.backward()
-            self.default_policy_optim.step()
+        self.default_policy_optim.zero_grad()
+        default_policy_loss = (kl_div_term + next_kl_div_term).mean()
+        nn.utils.clip_grad_norm_(self.default_policy_net.parameters(), self.gradient_clip)
+        default_policy_loss.backward()
+        self.default_policy_optim.step()
 
-            with torch.no_grad():
-                for param, target_param in zip(self.value_net.parameters(), self.value_net_target.parameters()):
-                    target_param.data.mul_(self.polyak)
-                    target_param.data.add_(param.data * (1-self.polyak))
-                for param, target_param in zip(self.policy_net.parameters(), self.policy_net_target.parameters()):
-                    target_param.data.mul_(self.polyak)
-                    target_param.data.add_(param.data * (1-self.polyak))
-                for param, target_param in zip(self.default_policy_net.parameters(), self.default_policy_net_target.parameters()):
-                    target_param.data.mul_(self.polyak)
-                    target_param.data.add_(param.data * (1-self.polyak))
+        with torch.no_grad():
+            for param, target_param in zip(self.value_net.parameters(), self.value_net_target.parameters()):
+                target_param.data.mul_(self.polyak)
+                target_param.data.add_(param.data * (1-self.polyak))
+            for param, target_param in zip(self.policy_net.parameters(), self.policy_net_target.parameters()):
+                target_param.data.mul_(self.polyak)
+                target_param.data.add_(param.data * (1-self.polyak))
+            for param, target_param in zip(self.default_policy_net.parameters(), self.default_policy_net_target.parameters()):
+                target_param.data.mul_(self.polyak)
+                target_param.data.add_(param.data * (1-self.polyak))
 
-        return  np.mean(qloss_list), np.mean(ploss_list)
+        return  q_loss.cpu().detach().numpy(), policy_loss.cpu().detach().numpy() 
 
 def state_preprocessing(state):
     return torch.tensor(state.copy(), dtype = torch.float32).unsqueeze(0).to(device)
@@ -253,7 +255,8 @@ if args.test:
     exit(0)
 
 interaction_count = 0
-num_episodes = 1000
+reward_list = []
+num_episodes = 10000
 for e in range(num_episodes):
     done = False
     score = 0
@@ -263,7 +266,7 @@ for e in range(num_episodes):
     state = state_preprocessing(time_step.observation['observations'])
 
     for c in count():
-        if interaction_count <= agent.update_after:
+        if interaction_count <= agent.start_train_after:
             action = np.random.uniform(env.action_spec().minimum, env.action_spec().maximum, env.action_spec().shape)
             action = torch.tensor(action, dtype=torch.float32).unsqueeze(0).to(device)
         else:
@@ -275,6 +278,7 @@ for e in range(num_episodes):
         #n_o = time_step.observation['observations']
         next_state = state_preprocessing(time_step.observation['observations'])
         r = time_step.reward
+        #reward_list.append(r)
         score += r
 
         #info_gain, log_likelihood = vime.calc_info_gain(o,a,n_o)
@@ -286,7 +290,7 @@ for e in range(num_episodes):
         state = next_state
         #o = n_o
         
-        if interaction_count % agent.update_every == 0 and interaction_count > agent.update_after:
+        if interaction_count % agent.train_period == 0 and interaction_count > agent.start_train_after:
             qloss, ploss = agent.train_model()
             if qloss != None:
                 qloss_list.append(qloss)
@@ -294,6 +298,12 @@ for e in range(num_episodes):
                 ploss_list.append(ploss)
         interaction_count += 1
         if time_step.step_type == 2:
+            #plt.figure(0)
+            #plt.clf()
+            #plt.plot(reward_list, label="reward")
+            #plt.title("Received Rewards")
+            #plt.pause(0.002)
+
             qloss_avg = 0.0 if len(qloss_list) == 0 else np.mean(qloss_list)
             ploss_avg = 0.0 if len(ploss_list) == 0 else np.mean(ploss_list)
             print("episode : {:3d} | end at : {:3d} steps | total interactions : {:7d} | score : {:8.3f} | q_loss = {:7.3f} | p_loss = {:7.3f} ".format(e, c+1, interaction_count, score, qloss_avg, ploss_avg))
