@@ -255,7 +255,7 @@ if args.test:
     exit(0)
 
 interaction_count = 0
-reward_list = []
+reward_list, p_loss_list, q_loss_list = [],[],[]
 num_episodes = 10000
 for e in range(num_episodes):
     done = False
@@ -298,14 +298,34 @@ for e in range(num_episodes):
                 ploss_list.append(ploss)
         interaction_count += 1
         if time_step.step_type == 2:
-            #plt.figure(0)
-            #plt.clf()
-            #plt.plot(reward_list, label="reward")
-            #plt.title("Received Rewards")
-            #plt.pause(0.002)
-
             qloss_avg = 0.0 if len(qloss_list) == 0 else np.mean(qloss_list)
             ploss_avg = 0.0 if len(ploss_list) == 0 else np.mean(ploss_list)
+
+            reward_list.append(score/(c+1))
+            p_loss_list.append(ploss_avg)
+            q_loss_list.append(qloss_avg)
+            if (e+1) % 100 == 0:
+                reward_avg = sum(reward_list) / len(reward_list)
+                reward_min = min(reward_list)
+                reward_max = max(reward_list)
+                plt.figure(0)
+                plt.clf()
+                plt.plot(reward_list, label="reward")
+                plt.axhline(reward_avg, linestyle = ':', label = 'avg : {:3f}'.format(reward_avg))
+                plt.axhline(reward_min, linestyle = ':', label = 'min : {:3f}'.format(reward_min))
+                plt.axhline(reward_max, linestyle = ':', label = 'max : {:3f}'.format(reward_max))
+                plt.title("Received Average Rewards")
+                plt.legend()
+                plt.savefig(f'./imgs/rewards_{e+1}.png')
+                reward_list = []
+
+                plt.figure(1)
+                plt.clf()
+                plt.plot(q_loss_list[-100:], label="qloss")
+                plt.plot(p_loss_list[-100:], label="ploss")
+                plt.title("Average Losses")
+                plt.legend()
+                plt.savefig(f'./imgs/losses_{e+1}.png')
             print("episode : {:3d} | end at : {:3d} steps | total interactions : {:7d} | score : {:8.3f} | q_loss = {:7.3f} | p_loss = {:7.3f} ".format(e, c+1, interaction_count, score, qloss_avg, ploss_avg))
             break
     #for _ in range(100):
