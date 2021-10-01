@@ -263,7 +263,7 @@ for e in range(num_episodes):
         if time_step.step_type == 2:
             qloss_avg = 0.0 if len(qloss_list) == 0 else np.mean(qloss_list)
             ploss_avg = 0.0 if len(ploss_list) == 0 else np.mean(ploss_list)
-            print("episode : {:3d} | end at : {:3d} steps | total interactions : {:7d} | score : {:3.3f} | q_loss = {:7.3f} | p_loss = {:7.3f} ".format(e, c+1, interaction_count, score, qloss_avg, ploss_avg))
+            print("episode : {:4d} | end at : {:3d} steps | total interactions : {:7d} | score : {:7.3f} | q_loss = {:7.3f} | p_loss = {:7.3f} ".format(e, c+1, interaction_count, score, qloss_avg, ploss_avg))
             break
     #for _ in range(100):
     #    transitions = agent.replay_buffer.sample(agent.batch_size)
