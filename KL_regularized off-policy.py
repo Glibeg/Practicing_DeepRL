@@ -53,8 +53,8 @@ STD_MAX_NOISE = 1
 class PolicyNet(nn.Module):
     def __init__(self, observations, actions):
         super(PolicyNet, self).__init__()
-        self.policy_fc1 = nn.Linear(observations, 100)
-        self.policy_fc2 = nn.Linear(100, 300)
+        self.policy_fc1 = nn.Linear(observations, 400)
+        self.policy_fc2 = nn.Linear(400, 300)
         self.policy_fc3 = nn.Linear(300, 200)
         self.policy_mean_out = nn.Linear(200, actions)
         self.policy_logstd_out = nn.Linear(200, actions)
@@ -85,8 +85,8 @@ class PolicyNet(nn.Module):
 class ValueNet(nn.Module):
     def __init__(self, observations, actions):
         super(ValueNet, self).__init__()
-        self.critic_fc1 = nn.Linear(observations + actions, 100)
-        self.critic_fc2 = nn.Linear(100, 400)
+        self.critic_fc1 = nn.Linear(observations + actions, 400)
+        self.critic_fc2 = nn.Linear(400, 400)
         self.critic_fc3 = nn.Linear(400, 300)
         self.critic_out = nn.Linear(300, 1)
 
@@ -165,6 +165,7 @@ class KL():
         next_pi_zero_distribution = Normal(next_default_mean, next_default_std)
         next_pi_zero_distribution_target = Normal(next_default_mean_target, next_default_std_target)
 
+        """
         pi_distribution_grad_cut = Normal(mean.detach(), std.detach())
         next_pi_distribution_grad_cut = Normal(next_mean.detach(), next_std.detach())
         kl_div_term = torch.distributions.kl.kl_divergence(pi_distribution_grad_cut, pi_zero_distribution).sum(axis = -1, keepdim = True)
@@ -190,6 +191,49 @@ class KL():
         self.policy_optim.step()
         ploss_list.append(policy_loss.cpu().detach().numpy())
 
+        self.default_policy_optim.zero_grad()
+        default_policy_loss = (kl_div_term + next_kl_div_term).mean()
+        nn.utils.clip_grad_norm_(self.default_policy_net.parameters(), self.gradient_clip)
+        default_policy_loss.backward()
+        self.default_policy_optim.step()
+        """
+        with torch.no_grad():
+            next_mean_target, next_std_target = self.policy_net_target(next_state_batch)
+            next_pi_distribution_target = Normal(next_mean_target, next_std_target)
+            target_action = next_pi_distribution_target.sample()
+            log_prob_next_action = next_pi_distribution.log_prob(target_action).sum(axis=-1, keepdim = True)
+            log_prob_next_action -= (2*(np.log(2) - target_action - F.softplus(-2*target_action))).sum(axis=1, keepdim = True)
+            log_prob_next_action_default = next_pi_zero_distribution_target.log_prob(target_action).sum(axis=-1, keepdim = True)
+            log_prob_next_action_default -= (2*(np.log(2) - target_action - F.softplus(-2*target_action))).sum(axis=1, keepdim = True)
+            target_action = torch.max(torch.tanh(target_action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
+            value_target = self.value_net_target(next_state_batch, target_action)
+            td_target = reward_batch + self.gamma * (value_target - self.alpha * (log_prob_next_action - log_prob_next_action_default).detach())# - self.alpha * kl_div_term_target.detach() 
+        
+        self.policy_optim.zero_grad()
+        action = pi_distribution.rsample()
+        log_prob_action = pi_distribution.log_prob(action).sum(axis=-1, keepdim = True)
+        log_prob_action -= (2*(np.log(2) - action - F.softplus(-2*action))).sum(axis=1, keepdim = True)
+        log_prob_action_default = pi_zero_distribution_target.log_prob(action).sum(axis=-1, keepdim = True)
+        log_prob_action_default -= (2*(np.log(2) - action - F.softplus(-2*action))).sum(axis=1, keepdim = True)
+        action = torch.max(torch.tanh(action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
+        value = self.value_net_target(state_batch, action)
+        policy_loss = (self.alpha * (log_prob_action - log_prob_action_default) - value).mean()
+        policy_loss.backward()
+        nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.gradient_clip)
+        self.policy_optim.step()
+        ploss_list.append(policy_loss.cpu().detach().numpy())
+
+        self.default_policy_optim.zero_grad()
+        sample_action = pi_distribution.rsample().detach()
+        log_prob_default_update_action = pi_distribution.log_prob(sample_action).sum(axis=-1, keepdim = True)
+        log_prob_default_update_action -= (2*(np.log(2) - target_action - F.softplus(-2*sample_action))).sum(axis=1, keepdim = True)
+        log_prob_default_update_action_default = pi_zero_distribution.log_prob(sample_action).sum(axis=-1, keepdim = True)
+        log_prob_default_update_action_default -= (2*(np.log(2) - sample_action - F.softplus(-2*sample_action))).sum(axis=1, keepdim = True)
+        default_policy_loss = (log_prob_default_update_action.detach() - log_prob_default_update_action_default).mean()
+        nn.utils.clip_grad_norm_(self.default_policy_net.parameters(), self.gradient_clip)
+        default_policy_loss.backward()
+        self.default_policy_optim.step()
+
         self.value_optim.zero_grad()
         state_action = self.value_net(state_batch, action_batch)
         q_loss = F.mse_loss(state_action, td_target)
@@ -197,12 +241,6 @@ class KL():
         nn.utils.clip_grad_norm_(self.value_net.parameters(), self.gradient_clip)
         self.value_optim.step()
         qloss_list.append(q_loss.cpu().detach().numpy())
-
-        self.default_policy_optim.zero_grad()
-        default_policy_loss = (kl_div_term + next_kl_div_term).mean()
-        nn.utils.clip_grad_norm_(self.default_policy_net.parameters(), self.gradient_clip)
-        default_policy_loss.backward()
-        self.default_policy_optim.step()
 
         with torch.no_grad():
             for param, target_param in zip(self.value_net.parameters(), self.value_net_target.parameters()):
