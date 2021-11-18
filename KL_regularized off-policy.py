@@ -98,18 +98,19 @@ class ValueNet(nn.Module):
 
 class KL():
     def __init__(self, states_dim, default_states_dim, action_space):
-        self.learning_rate = 0.0005
+        self.learning_rate = 0.0004
         self.memory_capacity = int(1e+6)
         self.batch_size = 256
         self.action_space = action_space
         self.action_high = torch.tensor(self.action_space.maximum.copy(), dtype = torch.float32).to(device)
-        self.alpha = 0.01
-        self.gamma = 0.9
+        self.alpha = 0.1
+        self.gamma = 0.99
         self.polyak = 0.995
         self.train_period = 200
         self.start_train_after = 20000
         self.render = True
         self.gradient_clip = 1.
+        self.logprob_clip = 10.
         self.default_states_dim = default_states_dim
 
         self.policy_net = PolicyNet(states_dim,action_space.shape[0]).to(device)
@@ -150,7 +151,7 @@ class KL():
         state_batch = torch.cat(batch.state)
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
-
+        """
         mean, std = self.policy_net(state_batch)
         default_mean, default_std = self.default_policy_net(state_batch[:,:self.default_states_dim])
         default_mean_target, default_std_target = self.default_policy_net_target(state_batch[:,:self.default_states_dim])
@@ -165,7 +166,6 @@ class KL():
         next_pi_zero_distribution = Normal(next_default_mean, next_default_std)
         next_pi_zero_distribution_target = Normal(next_default_mean_target, next_default_std_target)
 
-        """
         pi_distribution_grad_cut = Normal(mean.detach(), std.detach())
         next_pi_distribution_grad_cut = Normal(next_mean.detach(), next_std.detach())
         kl_div_term = torch.distributions.kl.kl_divergence(pi_distribution_grad_cut, pi_zero_distribution).sum(axis = -1, keepdim = True)
@@ -181,6 +181,14 @@ class KL():
             value_target = self.value_net_target(next_state_batch, target_action)
             td_target = reward_batch + self.gamma * (value_target - self.alpha * next_kl_div_term_target.detach()) - self.alpha * kl_div_term_target.detach() 
         
+        self.value_optim.zero_grad()
+        state_action = self.value_net(state_batch, action_batch)
+        q_loss = F.mse_loss(state_action, td_target)
+        q_loss.backward()
+        nn.utils.clip_grad_norm_(self.value_net.parameters(), self.gradient_clip)
+        self.value_optim.step()
+        qloss_list.append(q_loss.cpu().detach().numpy())
+
         self.policy_optim.zero_grad()
         action = pi_distribution.rsample()
         action = torch.max(torch.tanh(action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
@@ -197,18 +205,42 @@ class KL():
         default_policy_loss.backward()
         self.default_policy_optim.step()
         """
+        mean, std = self.policy_net(state_batch)
+        default_mean, default_std = self.default_policy_net(state_batch[:,:self.default_states_dim])
+        default_mean_target, default_std_target = self.default_policy_net_target(state_batch[:,:self.default_states_dim])
+        pi_distribution = Normal(mean, std)
+        pi_zero_distribution = Normal(default_mean, default_std)
+        pi_zero_distribution_target = Normal(default_mean_target, default_std_target)
+        
+        next_mean, next_std = self.policy_net(next_state_batch)
+        next_default_mean, next_default_std = self.default_policy_net(next_state_batch[:,:self.default_states_dim])
+        next_default_mean_target, next_default_std_target = self.default_policy_net_target(next_state_batch[:,:self.default_states_dim])
+        next_pi_distribution = Normal(next_mean, next_std)
+        next_pi_zero_distribution = Normal(next_default_mean, next_default_std)
+        next_pi_zero_distribution_target = Normal(next_default_mean_target, next_default_std_target)
+
         with torch.no_grad():
             next_mean_target, next_std_target = self.policy_net_target(next_state_batch)
             next_pi_distribution_target = Normal(next_mean_target, next_std_target)
             target_action = next_pi_distribution_target.sample()
             log_prob_next_action = next_pi_distribution.log_prob(target_action).sum(axis=-1, keepdim = True)
             log_prob_next_action -= (2*(np.log(2) - target_action - F.softplus(-2*target_action))).sum(axis=1, keepdim = True)
+            log_prob_next_action = torch.clamp(log_prob_next_action, max = self.logprob_clip)
             log_prob_next_action_default = next_pi_zero_distribution_target.log_prob(target_action).sum(axis=-1, keepdim = True)
             log_prob_next_action_default -= (2*(np.log(2) - target_action - F.softplus(-2*target_action))).sum(axis=1, keepdim = True)
+            log_prob_next_action_default = torch.clamp(log_prob_next_action_default, max = self.logprob_clip)
             target_action = torch.max(torch.tanh(target_action) * self.action_high, torch.tensor(self.action_space.minimum.copy(), dtype = torch.float32).to(device))
             value_target = self.value_net_target(next_state_batch, target_action)
             td_target = reward_batch + self.gamma * (value_target - self.alpha * (log_prob_next_action - log_prob_next_action_default).detach())# - self.alpha * kl_div_term_target.detach() 
         
+        self.value_optim.zero_grad()
+        state_action = self.value_net(state_batch, action_batch)
+        q_loss = F.mse_loss(state_action, td_target)
+        q_loss.backward()
+        nn.utils.clip_grad_norm_(self.value_net.parameters(), self.gradient_clip)
+        self.value_optim.step()
+        qloss_list.append(q_loss.cpu().detach().numpy())
+
         self.policy_optim.zero_grad()
         action = pi_distribution.rsample()
         log_prob_action = pi_distribution.log_prob(action).sum(axis=-1, keepdim = True)
@@ -234,14 +266,6 @@ class KL():
         default_policy_loss.backward()
         self.default_policy_optim.step()
 
-        self.value_optim.zero_grad()
-        state_action = self.value_net(state_batch, action_batch)
-        q_loss = F.mse_loss(state_action, td_target)
-        q_loss.backward()
-        nn.utils.clip_grad_norm_(self.value_net.parameters(), self.gradient_clip)
-        self.value_optim.step()
-        qloss_list.append(q_loss.cpu().detach().numpy())
-
         with torch.no_grad():
             for param, target_param in zip(self.value_net.parameters(), self.value_net_target.parameters()):
                 target_param.data.mul_(self.polyak)
@@ -259,10 +283,10 @@ def state_preprocessing(state):
     return torch.tensor(state.copy(), dtype = torch.float32).unsqueeze(0).to(device)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-domain', action = 'store', default= 'quadruped')
-parser.add_argument('-task', action = 'store', default= 'fetch')
+parser.add_argument('-domain', action = 'store', default= 'quadruped') #quadruped
+parser.add_argument('-task', action = 'store', default= 'fetch') #fetch
 parser.add_argument('-time', default = 30, type = int)
-parser.add_argument('-default_dim', default = 78, type = int)
+parser.add_argument('-default_dim', default = 78, type = int) #78
 parser.add_argument('--test', action = 'store_true')
 parser.add_argument('--load', action = 'store_true')
 args = parser.parse_args()
@@ -277,8 +301,11 @@ agent = KL(env.observation_spec()['observations'].shape[0], args.default_dim, en
 
 if args.load:
     agent.policy_net.load_state_dict(torch.load(f'./{args.domain}_{args.task}_pnet.pth'))
+    agent.policy_net_target.load_state_dict(torch.load(f'./{args.domain}_{args.task}_pnet.pth'))
     agent.default_policy_net.load_state_dict(torch.load(f'./{args.domain}_{args.task}_dpnet.pth'))
+    agent.default_policy_net_target.load_state_dict(torch.load(f'./{args.domain}_{args.task}_dpnet.pth'))
     agent.value_net.load_state_dict(torch.load(f'./{args.domain}_{args.task}_vnet.pth'))
+    agent.value_net_target.load_state_dict(torch.load(f'./{args.domain}_{args.task}_vnet.pth'))
 
 scores, episodes = [], []
 score_avg = 0
@@ -373,7 +400,8 @@ for e in range(num_episodes):
     #    state_batch = torch.cat(batch.state)
     #    action_batch = torch.cat(batch.action)
     #    elbo = vime.update_posterior(state_batch, action_batch, next_state_batch)
-    torch.save(agent.policy_net.state_dict(), f'./{args.domain}_{args.task}_pnet.pth')
-    torch.save(agent.default_policy_net.state_dict(), f'./{args.domain}_{args.task}_dpnet.pth')
-    torch.save(agent.value_net.state_dict(), f'./{args.domain}_{args.task}_vnet.pth')
+    if e % 100 == 0:
+        torch.save(agent.policy_net.state_dict(), f'./{args.domain}_{args.task}_pnet.pth')
+        torch.save(agent.default_policy_net.state_dict(), f'./{args.domain}_{args.task}_dpnet.pth')
+        torch.save(agent.value_net.state_dict(), f'./{args.domain}_{args.task}_vnet.pth')
 env.close()

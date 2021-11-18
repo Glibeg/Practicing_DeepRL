@@ -53,17 +53,17 @@ STD_MAX_NOISE = 1
 class PolicyNet(nn.Module):
     def __init__(self, observations, actions, act_limit):
         super(PolicyNet, self).__init__()
-        self.policy_fc1 = nn.Linear(observations, 400)
-        self.policy_fc2 = nn.Linear(400, 300)
-        self.policy_fc3 = nn.Linear(300, 200)
-        self.policy_mean_out = nn.Linear(200, actions)
-        self.policy_logstd_out = nn.Linear(200, actions)
+        self.policy_fc1 = nn.Linear(observations, 512)
+        self.policy_fc2 = nn.Linear(512, 512)
+        self.policy_fc3 = nn.Linear(512, 512)
+        self.policy_mean_out = nn.Linear(512, actions)
+        self.policy_logstd_out = nn.Linear(512, actions)
         self.act_limit = act_limit
 
     def forward(self, x):#, deterministic = False, with_logprob = True):
-        h = F.elu(self.policy_fc1(x))
-        h = F.elu(self.policy_fc2(h))
-        h = F.elu(self.policy_fc3(h))
+        h = F.relu(self.policy_fc1(x))
+        h = F.relu(self.policy_fc2(h))
+        h = F.relu(self.policy_fc3(h))
 
         mean = torch.tanh(self.policy_mean_out(h))
         std = 0.1 + (STD_MAX_NOISE - 0.1) * torch.sigmoid(self.policy_logstd_out(h))
@@ -83,25 +83,25 @@ class PolicyNet(nn.Module):
 class ValueNet(nn.Module):
     def __init__(self, observations, actions):
         super(ValueNet, self).__init__()
-        self.critic_fc1 = nn.Linear(observations + actions, 400)
-        self.critic_fc2 = nn.Linear(400, 400)
-        self.critic_fc3 = nn.Linear(400, 300)
-        self.critic_out = nn.Linear(300, 1)
+        self.critic_fc1 = nn.Linear(observations + actions, 512)
+        self.critic_fc2 = nn.Linear(512, 512)
+        self.critic_fc3 = nn.Linear(512, 512)
+        self.critic_out = nn.Linear(512, 1)
 
     def forward(self, x, a):
-        ch1 = F.elu(self.critic_fc1(torch.cat([x,a], dim = 1)))
-        ch2 = F.elu(self.critic_fc2(ch1))
-        ch3 = F.elu(self.critic_fc3(ch2))
-        return self.critic_out(ch3)
+        h = F.relu(self.critic_fc1(torch.cat([x,a], dim = 1)))
+        h = F.relu(self.critic_fc2(h))
+        h = F.relu(self.critic_fc3(h))
+        return self.critic_out(h)
 
 class SAC():
     def __init__(self, states_dim, action_space):
-        self.learning_rate = 0.0005
+        self.learning_rate = 0.0003
         self.memory_capacity = int(1e+6)
         self.batch_size = 256
         self.action_space = action_space
         self.alpha = 0.1
-        self.gamma = 0.9
+        self.gamma = 0.99
         self.polyak = 0.995
         self.train_period = 200
         self.start_train_after = 20000
@@ -185,7 +185,7 @@ def state_preprocessing(state):
     return torch.tensor(state.copy(), dtype = torch.float32).unsqueeze(0).to(device)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-domain', action = 'store', default= 'quadruped')
+parser.add_argument('-domain', action = 'store', default= 'cheetah')
 parser.add_argument('-task', action = 'store', default= 'run')
 parser.add_argument('-time', default = 30, type = int)
 parser.add_argument('-episodes', default = 3000, type = int)
